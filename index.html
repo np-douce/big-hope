@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hamiltonian Zero Edge Subtraction</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="input-panel">
+      <div>
+        <h1>Zero Edge Subtraction</h1>
+        <p>Enter real graph edges. Vertices are inferred from the largest number. Real edges have weight -1; missing edges have weight 0.</p>
+      </div>
+
+      <label for="edgeInput">Edges</label>
+      <textarea id="edgeInput" spellcheck="false" placeholder="1 2&#10;2 3&#10;3 4&#10;4 1"></textarea>
+
+      <label for="zeroEdgeCapInput">Zero-edge try cap</label>
+      <input id="zeroEdgeCapInput" type="number" min="0" step="1" value="50">
+
+      <div class="actions">
+        <button id="calculateBtn" type="button">Run Exact Subtraction</button>
+        <button id="sampleBtn" type="button">Load Sample</button>
+        <button id="clearBtn" type="button">Clear</button>
+      </div>
+
+      <p class="hint">Accepted formats: one edge per line, like <code>1 2</code>, <code>1,2</code>, or <code>(1,2)</code>.</p>
+    </section>
+
+    <section class="results-panel" aria-live="polite">
+      <div id="summary" class="summary empty">Enter edges and run exact subtraction.</div>
+      <div id="subtractionResult" class="subtraction-card empty">The exact inclusion-exclusion result will appear here.</div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
