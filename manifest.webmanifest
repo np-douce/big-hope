@@ -1,0 +1,8 @@
+{
+  "name": "NP-douce Ising Lab",
+  "short_name": "Ising Lab",
+  "start_url": "ising.html",
+  "display": "standalone",
+  "background_color": "#08090d",
+  "theme_color": "#36d3c2"
+}
