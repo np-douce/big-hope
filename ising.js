@@ -17,7 +17,6 @@ function options() {
     order: 5,
     mode: $("mode").value,
     maxBacktracks: Number($("backtracks").value),
-    solveTreesExactly: $("solveTrees").checked,
     visualizationOn: $("visualizationOn").checked,
     maxRenderedSpins: Number($("maxRenderedSpins").value)
   };

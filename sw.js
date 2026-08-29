@@ -1,4 +1,4 @@
-const CACHE = "np-douce-ising-lab-v17";
+const CACHE = "np-douce-ising-lab-v20";
 const ASSETS = [
   "index.html",
   "ising.html",
@@ -9,7 +9,6 @@ const ASSETS = [
   "ising-math.js",
   "ising-precheck.js",
   "ising-search.js",
-  "ising-tests.js",
   "manifest.webmanifest",
   "examples/spin-glass-50.txt",
   "examples/ferromagnetic-ring-8.txt",

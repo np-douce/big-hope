@@ -1,4 +1,4 @@
-import { approximateLnZ, cloneModel, exactEnergy } from "./ising-math.js";
+import { approximateConditionedLnZ, cloneModel, exactEnergy } from "./ising-math.js";
 import { fixSpin, preprocessState } from "./ising-precheck.js";
 
 export function conditionModel(model, localSpinIndex, value) {
@@ -6,8 +6,8 @@ export function conditionModel(model, localSpinIndex, value) {
 }
 
 export function scoreSpin(model, localSpinIndex, beta, order) {
-  const plus = approximateLnZ(conditionModel(model, localSpinIndex, 1), beta, order);
-  const minus = approximateLnZ(conditionModel(model, localSpinIndex, -1), beta, order);
+  const plus = approximateConditionedLnZ(model, localSpinIndex, 1, beta, order);
+  const minus = approximateConditionedLnZ(model, localSpinIndex, -1, beta, order);
   return {
     localSpinIndex,
     originalSpin: model.labels[localSpinIndex],

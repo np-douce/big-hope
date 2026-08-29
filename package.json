@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.cjs",
-    "test": "node ising-tests.js"
+    "start": "node server.cjs"
   }
 }

@@ -1,4 +1,4 @@
-import { EPS, cloneModel, edgeKey } from "./ising-math.js";
+import { EPS, cloneModel, edgeKey, hydrateModelMetadata } from "./ising-math.js";
 
 export function preprocessState(model, spins, options = {}) {
   let current = cloneModel(model);
@@ -25,12 +25,18 @@ export function preprocessState(model, spins, options = {}) {
   while (changed) {
     changed = false;
     normalizeCurrent(current, summary);
-    const components = connectedComponents(current);
-    summary.disconnectedComponents = Math.max(summary.disconnectedComponents, components.length);
-    summary.bipartiteComponents = Math.max(summary.bipartiteComponents, components.filter((c) => c.bipartite).length);
-    summary.unfrustratedGaugeComponents = Math.max(summary.unfrustratedGaugeComponents, components.filter((c) => c.unfrustratedGauge).length);
+    const graph = graphStats(current);
+    const denseFastPath = useDensePrecheckFastPath(current, graph);
+    const components = denseFastPath ? [] : connectedComponents(current, graph.adj);
+    if (denseFastPath) {
+      summary.disconnectedComponents = Math.max(summary.disconnectedComponents, current.n > 0 ? 1 : 0);
+    } else {
+      summary.disconnectedComponents = Math.max(summary.disconnectedComponents, components.length);
+      summary.bipartiteComponents = Math.max(summary.bipartiteComponents, components.filter((c) => c.bipartite).length);
+      summary.unfrustratedGaugeComponents = Math.max(summary.unfrustratedGaugeComponents, components.filter((c) => c.unfrustratedGauge).length);
+    }
 
-    const isolated = current.fields.findIndex((_, i) => degree(current, i) === 0);
+    const isolated = graph.degrees.findIndex((d) => d === 0);
     if (isolated >= 0) {
       const h = current.fields[isolated];
       const value = h < -EPS ? -1 : 1;
@@ -46,7 +52,9 @@ export function preprocessState(model, spins, options = {}) {
       continue;
     }
 
-    const treeComponent = options.solveTreesExactly ? components.find((c) => c.vertices.length > 1 && c.edges === c.vertices.length - 1) : null;
+    const treeComponent = !denseFastPath && options.solveTreesExactly
+      ? components.find((c) => c.vertices.length > 1 && c.edges === c.vertices.length - 1)
+      : null;
     if (treeComponent) {
       const exact = solveTreeComponent(current, treeComponent.vertices);
       for (const originalSpin of exact.order) {
@@ -63,7 +71,9 @@ export function preprocessState(model, spins, options = {}) {
       continue;
     }
 
-    const symmetricComponent = components.find((component) => component.vertices.length > 1 && component.vertices.every((i) => Math.abs(current.fields[i]) < EPS));
+    const symmetricComponent = denseFastPath
+      ? (current.n > 1 && current.fields.every((h) => Math.abs(h) < EPS) ? { vertices: Array.from({ length: current.n }, (_, i) => i) } : null)
+      : components.find((component) => component.vertices.length > 1 && component.vertices.every((i) => Math.abs(current.fields[i]) < EPS));
     if (symmetricComponent) {
       const local = [...symmetricComponent.vertices].sort((a, b) => current.labels[a] - current.labels[b])[0];
       const result = fixSpin(current, local, 1);
@@ -75,7 +85,7 @@ export function preprocessState(model, spins, options = {}) {
       continue;
     }
 
-    const dominant = findDominantField(current);
+    const dominant = findDominantField(current, graph.radii);
     if (dominant) {
       const value = dominant.h > 0 ? 1 : -1;
       const result = fixSpin(current, dominant.local, value);
@@ -88,11 +98,18 @@ export function preprocessState(model, spins, options = {}) {
   }
 
   summary.remainingSpins = current.n;
-  return { model: current, spins: assignments, log, summary, components: connectedComponents(current) };
+  const finalGraph = graphStats(current);
+  return {
+    model: current,
+    spins: assignments,
+    log,
+    summary,
+    components: useDensePrecheckFastPath(current, finalGraph) ? [] : connectedComponents(current, finalGraph.adj)
+  };
 }
 
-export function connectedComponents(model) {
-  const adj = adjacency(model);
+export function connectedComponents(model, prebuiltAdj = null) {
+  const adj = prebuiltAdj || adjacency(model);
   const seen = new Set();
   const components = [];
   for (let start = 0; start < model.n; start++) {
@@ -159,46 +176,59 @@ export function fixSpin(model, localSpinIndex, value) {
     constantChange: -originalField * value,
     remaining: nextLabels.length,
     fieldUpdates,
-    model: {
+    model: hydrateModelMetadata({
       n: nextLabels.length,
       labels: nextLabels,
       fields: nextFields,
       couplings: nextCouplings,
       offset,
       normalizationStats: { ...(model.normalizationStats || {}) }
-    }
+    })
   };
 }
 
 function normalizeCurrent(model, summary) {
+  let changed = false;
   for (const [key, value] of [...model.couplings.entries()]) {
     if (Math.abs(value) < EPS) {
       model.couplings.delete(key);
       summary.zeroCouplingsRemoved++;
+      changed = true;
     }
   }
+  if (changed) hydrateModelMetadata(model);
 }
 
-function degree(model, local) {
-  let count = 0;
-  for (const key of model.couplings.keys()) {
-    const [a, b] = key.split(":").map(Number);
-    if (a === local || b === local) count++;
-  }
-  return count;
-}
-
-function findDominantField(model) {
+function findDominantField(model, radii = null) {
   for (let i = 0; i < model.n; i++) {
     const h = model.fields[i];
-    let radius = 0;
-    for (const [key, value] of model.couplings.entries()) {
-      const [a, b] = key.split(":").map(Number);
-      if (a === i || b === i) radius += Math.abs(value);
-    }
+    const radius = radii ? radii[i] : localRadius(model, i);
     if (Math.abs(h) > radius + EPS) return { local: i, h, radius };
   }
   return null;
+}
+
+function localRadius(model, local) {
+  let radius = 0;
+  for (const [key, value] of model.couplings.entries()) {
+    const [a, b] = key.split(":").map(Number);
+    if (a === local || b === local) radius += Math.abs(value);
+  }
+  return radius;
+}
+
+function graphStats(model) {
+  const adj = (model.adjacency || []).map((neighbors) => neighbors.map((edge) => edge.to));
+  const degrees = model.degrees ? [...model.degrees] : adj.map((neighbors) => neighbors.length);
+  const radii = model.radii ? [...model.radii] : Array(model.n).fill(0);
+  const edges = model.edges ? model.edges.length : model.couplings.size;
+  const possible = model.n * (model.n - 1) / 2;
+  const density = possible > 0 ? edges / possible : 0;
+  return { adj, degrees, radii, edges, density };
+}
+
+function useDensePrecheckFastPath(model, graph) {
+  return model.n > 12 && graph.density >= 0.45 && graph.degrees.every((degree) => degree > 0);
 }
 
 function adjacency(model) {
