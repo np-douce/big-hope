@@ -8,6 +8,8 @@ import { solveTaylor } from "./ising-search.js";
 import { examples } from "./ising-examples.js";
 
 const $ = (id) => document.getElementById(id);
+const VISUAL_SPIN_LIMIT = 100;
+let previewTimer = null;
 const output = $("output");
 const summaryGrid = $("summaryGrid");
 
@@ -15,10 +17,7 @@ function options() {
   return {
     beta: Number($("beta").value),
     order: 5,
-    mode: $("mode").value,
-    maxBacktracks: Number($("backtracks").value),
-    visualizationOn: $("visualizationOn").checked,
-    maxRenderedSpins: Number($("maxRenderedSpins").value)
+    maxBacktracks: Number($("backtracks").value)
   };
 }
 
@@ -50,7 +49,8 @@ function runSolver() {
     const cumulants = calculateCumulants(model, opts.order);
     const lnz = approximateLnZ(model, opts.beta, opts.order);
     const result = solveTaylor(model, opts);
-    if (opts.visualizationOn) prepareVisualization(model, result);
+    prepareVisualization(model, result);
+    showFinalAssignment();
     const stats = modelStats(model);
 
     setSummary([
@@ -63,48 +63,26 @@ function runSolver() {
     ]);
 
     const lines = [
-      "Input summary",
+      "Answer",
+      `Final spins: ${formatSpins(result.spins)}`,
+      `Exact final energy: ${formatNumber(result.energy)}`,
+      "",
+      "Run summary",
       `N: ${model.n}`,
       `Couplings: ${stats.couplings}`,
       `Nonzero fields: ${stats.fields}`,
       `Beta: ${opts.beta}`,
       `Taylor order: ${opts.order}`,
-      "",
-      "Cumulants",
-      ...Array.from({ length: opts.order }, (_, i) => i + 1).map((r) => `kappa${r}: ${formatNumber(cumulants.kappa[r])}`),
-      `Cycles: triangles=${cumulants.counts.triangles}, C4=${cumulants.counts.cycles4}, C5=${cumulants.counts.cycles5}`,
-      `ln Z approximation: ${formatNumber(lnz.value)}`,
-      "",
-      "Search result",
-      `Final spins: ${formatSpins(result.spins)}`,
-      `Exact final energy: ${formatNumber(result.energy)}`,
-      `Best energy found: ${formatNumber(result.bestEnergy)}`,
       `Decisions: ${result.decisions}`,
-      `Backtracks: ${result.backtracks}`,
-      `Runtime: ${formatNumber(result.runtimeMs)} ms`
+      `Backtrack branches explored: ${result.backtracks}`,
+      `Total branches explored: ${result.branchesExplored || 1}`,
+      `Runtime: ${formatNumber(result.runtimeMs)} ms`,
+      `ln Z approximation: ${formatNumber(lnz.value)}`,
+      `Cycles: triangles=${cumulants.counts.triangles}, C4=${cumulants.counts.cycles4}, C5=${cumulants.counts.cycles5}`
     ];
 
     lines.push("", "Precheck summary", ...formatPrecheckSummary(result.precheckSummary));
-
-    lines.push("", "Decision trace", ...formatDecisionLog(result.decisionLog));
     write(lines.join("\n"));
-  } catch (error) {
-    write(`Error: ${error.message}`);
-  }
-}
-
-function runBetaBenchmark() {
-  try {
-    const model = currentModel();
-    const opts = options();
-    const betas = $("betaList").value.split(/\s+/).map(Number).filter(Number.isFinite);
-    const rows = ["Beta | Energy found | Backtracks | Runtime ms", "---- | ------------ | ---------- | ----------"];
-    for (const beta of betas) {
-      const result = solveTaylor(model, { ...opts, beta });
-      rows.push(`${beta} | ${formatNumber(result.energy)} | ${result.backtracks} | ${formatNumber(result.runtimeMs)}`);
-    }
-    setSummary([["benchmark", "beta sweep"], ["order", opts.order], ["mode", opts.mode], ["cases", betas.length]]);
-    write(rows.join("\n"));
   } catch (error) {
     write(`Error: ${error.message}`);
   }
@@ -177,41 +155,26 @@ function escapeHtml(value) {
 
 function init() {
   $("startupHelp").style.display = "none";
+  $("startupHelp").textContent = "JavaScript loaded. Buttons are active.";
+  $("startupHelp").style.display = "block";
   for (const [key, example] of Object.entries(examples)) {
-    const option = document.createElement("option");
-    option.value = key;
-    option.textContent = example.name;
-    $("exampleSelect").append(option);
-
     const button = document.createElement("button");
     button.type = "button";
     button.className = "miniButton";
-    button.textContent = example.name;
+    button.innerHTML = `<strong>${escapeHtml(example.name)}</strong><span>${escapeHtml(example.benchmark)}</span>`;
     button.addEventListener("click", () => {
-      $("exampleSelect").value = key;
       $("isingInput").value = example.text;
-      runSolver();
+      prepareVisualization(currentModel(), null);
+      setSummary([["example", example.name], ["visual", "ready"]]);
+      write(`${example.name} loaded.\nBenchmark note: ${example.benchmark}`);
     });
     $("exampleButtons").append(button);
   }
-  $("isingInput").value = examples.fields5.text;
-  $("isingInput").value = examples.spinGlass50.text;
+  $("isingInput").value = examples.spinGlass100.text;
 
-  document.querySelectorAll(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      document.querySelectorAll(".tab, .panel").forEach((node) => node.classList.remove("active"));
-      tab.classList.add("active");
-      $(tab.dataset.panel).classList.add("active");
-      if (tab.dataset.panel === "visualizer") drawVisualization();
-    });
-  });
+  $("isingInput").addEventListener("input", scheduleGraphPreview);
 
-  $("loadExample").addEventListener("click", () => {
-    $("isingInput").value = examples[$("exampleSelect").value].text;
-    prepareVisualization(currentModel(), null);
-  });
   $("runSolver").addEventListener("click", runSolver);
-  $("runBetaBenchmark").addEventListener("click", runBetaBenchmark);
   $("clearOutput").addEventListener("click", () => {
     setSummary([]);
     write("Ready.");
@@ -223,16 +186,12 @@ function init() {
       prepareVisualization(currentModel(), null);
     }
   });
-  $("visualRun").addEventListener("click", runVisualAnimation);
-  $("visualPause").addEventListener("click", pauseVisualAnimation);
-  $("visualNext").addEventListener("click", () => stepVisualization(1));
-  $("visualReset").addEventListener("click", resetVisualization);
   $("spinCanvas").addEventListener("click", selectCanvasSpin);
   window.addEventListener("resize", drawVisualization);
 
   prepareVisualization(currentModel(), null);
-  setSummary([["spins", 50], ["example", "50-node spin glass"], ["visual", "ready"]]);
-  write("Ready. The 50-node spin glass is loaded. Open the Visualizer tab to inspect it, or press Run Taylor solver when you want to compute decisions.");
+  setSummary([["spins", 100], ["example", "100-node spin glass"], ["visual", "ready"]]);
+  write("Ready. The 100-node spin glass is loaded. Press Run Taylor solver to compute assignments and draw the final Visualizer state.");
 }
 
 const visualState = {
@@ -245,83 +204,57 @@ const visualState = {
   importance: new Map(),
   selected: null,
   step: 0,
-  timer: null
+  sourceText: ""
 };
 
 function prepareVisualization(model, result) {
   visualState.model = model;
   visualState.result = result;
+  visualState.sourceText = $("isingInput")?.value || "";
   visualState.assignments = new Map();
   visualState.reasons = new Map();
   visualState.importance = new Map();
   visualState.selected = null;
   visualState.step = 0;
-  const cap = Number($("maxRenderedSpins").value || 150);
-  const count = Math.min(model.n, cap);
-  const nodes = Array.from({ length: count }, (_, i) => {
-    const angle = (i / count) * Math.PI * 2;
-    const radius = 210 + 48 * Math.sin(i * 1.7);
-    return {
-      index: i,
-      x: 450 + Math.cos(angle) * radius,
-      y: 310 + Math.sin(angle) * radius,
-      vx: 0,
-      vy: 0
-    };
-  });
+  if (model.n > VISUAL_SPIN_LIMIT) {
+    visualState.nodes = [];
+    visualState.edges = [];
+    drawVisualization();
+    return;
+  }
+  const nodes = layoutNodes(model.n, 450, 310, 260);
   const rendered = new Set(nodes.map((n) => n.index));
-  const edges = [...model.couplings.entries()].map(([key, J]) => {
-    const [a, b] = key.split(":").map(Number);
-    return { a, b, J };
-  }).filter((e) => rendered.has(e.a) && rendered.has(e.b));
+  const edges = (model.edges || [...model.couplings.entries()].map(([key, J]) => {
+    const [i, j] = key.split(":").map(Number);
+    return { i, j, J };
+  })).map((edge) => ({ a: edge.i, b: edge.j, J: edge.J }))
+    .filter((e) => rendered.has(e.a) && rendered.has(e.b));
   visualState.nodes = nodes;
   visualState.edges = edges;
-  settleLayout();
   drawVisualization();
 }
 
-function settleLayout() {
-  const nodes = visualState.nodes;
-  const edges = visualState.edges;
-  for (let tick = 0; tick < 180; tick++) {
-    for (const node of nodes) {
-      node.vx += (450 - node.x) * 0.0008;
-      node.vy += (310 - node.y) * 0.0008;
-    }
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i];
-        const b = nodes[j];
-        const dx = a.x - b.x;
-        const dy = a.y - b.y;
-        const d2 = Math.max(64, dx * dx + dy * dy);
-        const force = 56 / d2;
-        a.vx += dx * force;
-        a.vy += dy * force;
-        b.vx -= dx * force;
-        b.vy -= dy * force;
-      }
-    }
-    for (const edge of edges) {
-      const a = nodes[edge.a];
-      const b = nodes[edge.b];
-      if (!a || !b) continue;
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const dist = Math.max(1, Math.hypot(dx, dy));
-      const force = (dist - 92) * 0.003;
-      a.vx += dx / dist * force;
-      a.vy += dy / dist * force;
-      b.vx -= dx / dist * force;
-      b.vy -= dy / dist * force;
-    }
-    for (const node of nodes) {
-      node.vx *= 0.86;
-      node.vy *= 0.86;
-      node.x = Math.min(870, Math.max(30, node.x + node.vx));
-      node.y = Math.min(590, Math.max(30, node.y + node.vy));
+function layoutNodes(count, centerX, centerY, maxRadius) {
+  if (count <= 0) return [];
+  if (count === 1) return [{ index: 0, x: centerX, y: centerY }];
+  const rings = Math.max(1, Math.ceil(Math.sqrt(count / 8)));
+  const nodes = [];
+  let placed = 0;
+  for (let ring = 1; ring <= rings && placed < count; ring++) {
+    const remaining = count - placed;
+    const ringCapacity = ring === rings ? remaining : Math.max(6, Math.round((count * ring) / ((rings * (rings + 1)) / 2)));
+    const radius = Math.max(38, (maxRadius * ring) / rings);
+    const phase = (ring % 2) * Math.PI / Math.max(1, ringCapacity);
+    for (let k = 0; k < ringCapacity && placed < count; k++, placed++) {
+      const angle = phase + (k / ringCapacity) * Math.PI * 2;
+      nodes.push({
+        index: placed,
+        x: centerX + Math.cos(angle) * radius,
+        y: centerY + Math.sin(angle) * radius
+      });
     }
   }
+  return nodes;
 }
 
 function drawVisualization() {
@@ -334,6 +267,14 @@ function drawVisualization() {
   canvas.height = Math.max(420, Math.floor(620 * scale));
   ctx.setTransform(canvas.width / 900, 0, 0, canvas.height / 620, 0, 0);
   ctx.clearRect(0, 0, 900, 620);
+  if (visualState.model.n > VISUAL_SPIN_LIMIT) {
+    ctx.fillStyle = "#edf6f5";
+    ctx.font = "18px system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("Visualization unavailable for more than 100 spins.", 450, 305);
+    updateVisualInfo();
+    return;
+  }
 
   const maxJ = Math.max(0.01, ...visualState.edges.map((e) => Math.abs(e.J)));
   for (const edge of visualState.edges) {
@@ -381,27 +322,34 @@ function nodeColor(value, reason) {
   return "#17212c";
 }
 
-function runVisualAnimation() {
-  if (!visualState.result) runSolver();
-  pauseVisualAnimation();
-  visualState.timer = setInterval(() => stepVisualization(1), 650);
-}
-
-function pauseVisualAnimation() {
-  if (visualState.timer) clearInterval(visualState.timer);
-  visualState.timer = null;
-}
-
 function resetVisualization() {
-  pauseVisualAnimation();
   prepareVisualization(currentModel(), visualState.result);
 }
 
-function stepVisualization(count) {
+function previewCurrentGraph() {
+  try {
+    const text = $("isingInput").value;
+    if (text !== visualState.sourceText) prepareVisualization(parseIsingText(text), null);
+    else drawVisualization();
+  } catch (error) {
+    const box = $("visualInfo");
+    if (box) box.textContent = `Input error: ${error.message}`;
+  }
+}
+
+function scheduleGraphPreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(previewCurrentGraph, 180);
+}
+
+function showFinalAssignment() {
   if (!visualState.result) return;
   const log = visualState.result.decisionLog || [];
-  for (let c = 0; c < count && visualState.step < log.length; c++) {
-    const entry = log[visualState.step++];
+  visualState.assignments = new Map();
+  visualState.reasons = new Map();
+  visualState.importance = new Map();
+  visualState.selected = null;
+  for (const entry of log) {
     const spin = entry.spin - 1;
     if (spin >= visualState.nodes.length) continue;
     visualState.selected = spin;
@@ -409,7 +357,6 @@ function stepVisualization(count) {
     visualState.reasons.set(spin, entry.type === "precheck" ? entry.reason : (entry.isAlternate ? "BACKTRACKED" : "TAYLOR_DECISION"));
     if (entry.importance !== undefined) visualState.importance.set(spin, entry.importance);
   }
-  if (visualState.step >= log.length) pauseVisualAnimation();
   drawVisualization();
 }
 
@@ -437,8 +384,8 @@ function updateVisualInfo() {
   const model = visualState.model;
   const box = $("visualInfo");
   if (!model || !box) return;
-  if (model.n > visualState.nodes.length) {
-    box.textContent = `Model contains ${model.n} spins. Visualization capped at ${visualState.nodes.length} spins. Solver is still using the full model.`;
+  if (model.n > VISUAL_SPIN_LIMIT) {
+    box.textContent = `Visualization unavailable for ${model.n} spins. The solver can still run on the full input.`;
     return;
   }
   if (visualState.selected === null) {

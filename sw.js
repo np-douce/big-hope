@@ -1,4 +1,4 @@
-const CACHE = "np-douce-ising-lab-v20";
+const CACHE = "np-douce-ising-lab-v30";
 const ASSETS = [
   "index.html",
   "ising.html",
@@ -10,11 +10,8 @@ const ASSETS = [
   "ising-precheck.js",
   "ising-search.js",
   "manifest.webmanifest",
-  "examples/spin-glass-50.txt",
-  "examples/ferromagnetic-ring-8.txt",
-  "examples/antiferromagnetic-ring-8.txt",
-  "examples/frustrated-antiferro-ring-9.txt",
-  "examples/planted-field-12.txt"
+  "examples/spin-glass-100.txt",
+  "examples/frustrated-antiferro-ring-9.txt"
 ];
 
 self.addEventListener("install", (event) => {

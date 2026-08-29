@@ -20,43 +20,24 @@
   </header>
 
   <main class="layout">
-    <aside class="solverRail">
-      <div class="railTitle">Ising tools</div>
-      <nav class="tabs" aria-label="Ising tools">
-        <div class="tabGroup">
-          <span class="tabGroupLabel">Experiment</span>
-          <button class="tab active" data-panel="solver">Solver</button>
-          <button class="tab" data-panel="visualizer">Visualizer</button>
-          <button class="tab" data-panel="benchmarks">Beta sweep</button>
-        </div>
-      </nav>
-    </aside>
-
     <section class="appBody">
       <div class="globalControls">
         <label>Beta<input id="beta" type="number" min="0" step="0.05" value="0.5"></label>
-        <label>Spin mode
-          <select id="mode">
-            <option value="max" selected>Max |I|</option>
-            <option value="sequential">Sequential</option>
-          </select>
-        </label>
         <label>Maximum backtracks<input id="backtracks" type="number" min="0" max="200000" step="1" value="0"></label>
-        <label class="switchLine">Visualization<input id="visualizationOn" type="checkbox" checked><span class="switchTrack"></span></label>
-        <label>Maximum rendered spins<input id="maxRenderedSpins" type="number" min="20" max="300" step="10" value="150"></label>
         <p class="fieldNote">Fifth-order Taylor/cumulant search with exact preprocessing.</p>
       </div>
 
       <section class="workspace">
-        <section id="solver" class="panel active">
-          <div class="panelHead">
-            <h2>Weighted Ising input</h2>
-            <p>Use one-based spin numbers. Missing fields default to zero; missing couplings mean no interaction.</p>
-          </div>
-          <label>Built-in examples</label>
-          <div id="exampleButtons" class="exampleButtons" aria-label="Built-in example buttons"></div>
-          <label>Ising data</label>
-          <textarea id="isingInput" spellcheck="false">N 5
+        <div class="solveGrid">
+          <section id="solver" class="panel">
+            <div class="panelHead">
+              <h2>Weighted Ising input</h2>
+              <p>Use one-based spin numbers. Missing fields default to zero; missing couplings mean no interaction.</p>
+            </div>
+            <label>Built-in examples</label>
+            <div id="exampleButtons" class="exampleButtons" aria-label="Built-in example buttons"></div>
+            <label>Ising data</label>
+            <textarea id="isingInput" spellcheck="false">N 5
 
 FIELDS
 1 0.5
@@ -72,27 +53,29 @@ COUPLINGS
 2 4 -0.8
 3 5 1.2
 4 5 -1</textarea>
-          <div class="controls">
-            <label class="fileButton">Load text file<input type="file" id="inputFile" accept=".txt"></label>
-            <button id="previewGraph">Preview graph</button>
-            <button id="runSolver">Run Taylor solver</button>
-          </div>
-          <div id="startupHelp" class="benchmarkMeta">
-            If this message stays here, the fallback controls are active but the full solver script did not load.
-          </div>
-        </section>
+            <div class="controls">
+              <label class="fileButton">Load text file<input type="file" id="inputFile" accept=".txt"></label>
+              <button id="runSolver">Run Taylor solver</button>
+            </div>
+            <div id="startupHelp" class="benchmarkMeta">
+              If this message stays here, the fallback controls are active but the full solver script did not load.
+            </div>
+          </section>
 
-        <section id="visualizer" class="panel widePanel">
+          <section class="outputPanel">
+            <div class="outputHead">
+              <h2>Output</h2>
+              <button id="clearOutput" title="Clear output">Clear</button>
+            </div>
+            <div id="summaryGrid" class="summaryGrid"></div>
+            <pre id="output">Ready.</pre>
+          </section>
+        </div>
+
+        <section id="visualizer" class="panel visualPanel">
           <div class="panelHead">
             <h2>Spin-glass visualization</h2>
             <p>Canvas view for the current instance. Positive and negative couplings use different edge colors; line thickness follows |J|.</p>
-          </div>
-          <div class="visualToolbar">
-            <button id="visualRun" aria-label="Run animation">▶ Run</button>
-            <button id="visualPause" aria-label="Pause animation">Ⅱ Pause</button>
-            <button id="visualNext" aria-label="Next step">→ Next</button>
-            <button id="visualFinal" aria-label="Show final assignment">⇥ Final</button>
-            <button id="visualReset" aria-label="Reset visualization">↺ Reset</button>
           </div>
           <div class="graphLegend" aria-label="Visualization legend">
             <span><i class="edgeSample positive"></i> J &gt; 0</span>
@@ -103,54 +86,11 @@ COUPLINGS
             <span><i class="nodeSample symmetry"></i> symmetry</span>
           </div>
           <canvas id="spinCanvas" width="900" height="620" aria-label="Spin-glass graph visualization"></canvas>
-          <div id="visualInfo" class="visualInfo" aria-live="polite">Preview shows unresolved spins. Run the solver, then use Next or Final to show assignments.</div>
-        </section>
-
-        <section id="benchmarks" class="panel">
-          <div class="panelHead">
-            <h2>Beta sweep</h2>
-            <p>Run the fixed fifth-order Taylor/cumulant solver across beta values.</p>
-          </div>
-          <label>Beta values</label>
-          <textarea id="betaList" spellcheck="false">0.05
-0.1
-0.2
-0.5
-1
-2</textarea>
-          <div class="controls">
-            <button id="runBetaBenchmark">Run beta sweep</button>
-          </div>
-        </section>
-
-        <section class="outputPanel">
-          <div class="outputHead">
-            <h2>Output</h2>
-            <button id="clearOutput" title="Clear output">Clear</button>
-          </div>
-          <div id="summaryGrid" class="summaryGrid"></div>
-          <pre id="output">Ready.</pre>
+          <div id="visualInfo" class="visualInfo" aria-live="polite">Preview shows unresolved spins. Run the solver to draw the final assignment.</div>
         </section>
       </section>
     </section>
   </main>
-
-  <script>
-    document.querySelectorAll(".tab").forEach((tab) => {
-      tab.addEventListener("click", () => {
-        document.querySelectorAll(".tab, .panel").forEach((node) => node.classList.remove("active"));
-        tab.classList.add("active");
-        const panel = document.getElementById(tab.dataset.panel);
-        if (panel) panel.classList.add("active");
-      });
-    });
-    document.getElementById("previewGraph")?.addEventListener("click", () => {
-      document.querySelectorAll(".tab, .panel").forEach((node) => node.classList.remove("active"));
-      document.querySelector('[data-panel="visualizer"]')?.classList.add("active");
-      document.getElementById("visualizer")?.classList.add("active");
-      document.getElementById("visualInfo").textContent = "Graph preview control responded. Full drawing loads from ising-app.js.";
-    });
-  </script>
   <script src="ising-app.js"></script>
   <script>
     if ("serviceWorker" in navigator && location.protocol !== "file:") {

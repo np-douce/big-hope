@@ -29,7 +29,7 @@ ln Z^(5)(beta)
 - beta^5 kappa5 / 120.
 ```
 
-For each unresolved spin, max mode compares both conditioned approximations:
+For each unresolved spin, the solver compares both conditioned approximations:
 
 ```text
 I_i = ln Z^(5)(s_i = +1) - ln Z^(5)(s_i = -1)
@@ -72,7 +72,7 @@ These checks simplify the model but do not replace the Taylor/cumulant search fo
 - `ising-math.js` - Hamiltonian evaluation, ghost-spin graph, cumulants, and Taylor ln Z.
 - `ising-search.js` - conditioning, importance scoring, Taylor-guided search, and backtracking.
 - `ising-precheck.js` - preprocessing reductions and diagnostics.
-- `ising-examples.js` - built-in examples, including the 50-node spin glass.
+- `ising-examples.js` - built-in 100-node and 9-node examples.
 - `sw.js` and `manifest.webmanifest` - offline/PWA support.
 - `examples/` - plain-text benchmark-style inputs.
 

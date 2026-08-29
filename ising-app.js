@@ -634,7 +634,6 @@ function scoreSpin(model, localSpinIndex, beta, order) {
 function solveTaylor(originalModel, options = {}) {
   const beta = Number(options.beta ?? 0.5);
   const order = 5;
-  const mode = options.mode || "max";
   const maxBacktracks = Math.max(0, Number(options.maxBacktracks ?? 0));
   const started = performance.now();
   let bestEnergy = Infinity;
@@ -644,66 +643,23 @@ function solveTaylor(originalModel, options = {}) {
   let decisions = 0;
   let firstComplete = null;
   const decisionLog = [];
-  const initial = {
+  const branchLimit = maxBacktracks + 1;
+  const queue = [{
     model: cloneModel(originalModel),
     spins: Array(originalModel.n).fill(null),
     depth: 0,
     trace: [],
-    deviations: 0
-  };
-  const stack = [initial];
-  while (stack.length) {
-    const node = stack.pop();
-    const prechecked = preprocessState(node.model, node.spins, { countNormalization: !node.precheckSummary });
-    node.model = prechecked.model;
-    node.spins = prechecked.spins;
-    node.trace = [...node.trace, ...prechecked.log];
-    node.precheckSummary = mergeSummaries(node.precheckSummary, prechecked.summary);
-    if (node.model.n === 0) {
-      const energy = exactEnergy(originalModel, node.spins);
-      if (!firstComplete) firstComplete = { energy, spins: [...node.spins], trace: node.trace };
-      if (energy < bestEnergy - 1e-10) {
-        bestEnergy = energy;
-        bestSpins = [...node.spins];
-        bestPrecheckSummary = node.precheckSummary || {};
-        decisionLog.splice(0, decisionLog.length, ...node.trace);
-      }
-      continue;
-    }
-    const scores = [];
-    if (mode === "sequential") {
-      scores.push(scoreSpin(node.model, 0, beta, order));
-    } else {
-      for (let i = 0; i < node.model.n; i++) scores.push(scoreSpin(node.model, i, beta, order));
-      scores.sort((a, b) => Math.abs(b.importance) - Math.abs(a.importance));
-    }
-    const chosen = scores[0];
-    decisions++;
-    for (const branch of [chosen.alternate, chosen.preferred]) {
-      const isAlternate = branch === chosen.alternate;
-      const deviations = node.deviations + (isAlternate ? 1 : 0);
-      if (isAlternate && deviations > maxBacktracks) continue;
-      if (isAlternate) backtracks++;
-      const spins = [...node.spins];
-      spins[chosen.originalSpin] = branch;
-      const fixed = fixSpin(node.model, chosen.localSpinIndex, branch);
-      const step = {
-        type: "taylor",
-        step: node.depth + 1,
-        spin: chosen.originalSpin + 1,
-        Lplus: chosen.Lplus,
-        Lminus: chosen.Lminus,
-        importance: chosen.importance,
-        chosen: branch,
-        preferred: chosen.preferred,
-        isAlternate,
-        candidateScores: mode === "max" ? scores : [chosen],
-        backtracksSoFar: backtracks,
-        fieldUpdates: fixed.fieldUpdates,
-        constantChange: fixed.constantChange
-      };
-      stack.push({ model: fixed.model, spins, depth: node.depth + 1, trace: [...node.trace, step], deviations, precheckSummary: node.precheckSummary });
-    }
+    remaining: originalModel.n,
+    penalty: 0,
+    branchBacktracks: 0,
+    label: "greedy"
+  }];
+  let explored = 0;
+  let queued = 1;
+  while (queue.length && explored < branchLimit) {
+    queue.sort(compareBranches);
+    followPath(queue.shift());
+    explored++;
   }
   const fallback = firstComplete || { energy: Infinity, spins: [], trace: [] };
   return {
@@ -712,11 +668,135 @@ function solveTaylor(originalModel, options = {}) {
     bestEnergy: Number.isFinite(bestEnergy) ? bestEnergy : fallback.energy,
     bestSpins: bestSpins || fallback.spins,
     decisions,
-    backtracks,
+    backtracks: Math.max(0, explored - 1),
+    branchesExplored: explored,
+    branchesQueued: queued,
     runtimeMs: performance.now() - started,
     decisionLog: decisionLog.length ? decisionLog : fallback.trace,
     precheckSummary: bestPrecheckSummary
   };
+
+  function followPath(startNode) {
+    let node = startNode;
+    while (true) {
+      const prechecked = preprocessState(node.model, node.spins, { countNormalization: !node.precheckSummary });
+      node = {
+        ...node,
+        model: prechecked.model,
+        spins: prechecked.spins,
+        trace: [...node.trace, ...prechecked.log],
+        precheckSummary: mergeSummaries(node.precheckSummary, prechecked.summary)
+      };
+      if (node.model.n === 0) {
+        recordComplete(node);
+        return;
+      }
+      const scores = [];
+      for (let i = 0; i < node.model.n; i++) scores.push(scoreSpin(node.model, i, beta, order));
+      scores.sort((a, b) => Math.abs(b.importance) - Math.abs(a.importance));
+      const chosen = scores[0];
+      decisions++;
+      enqueueAlternatives(node, scores);
+      node = applyBranch(node, chosen, chosen.preferred, false, scores);
+    }
+  }
+
+  function enqueueAlternatives(node, scores) {
+    if (scores.length <= 1) return;
+    const best = scores[0];
+    const alternatives = [];
+    for (let optionIndex = 1; optionIndex < scores.length && alternatives.length < 2; optionIndex++) {
+      alternatives.push({
+        chosen: scores[optionIndex],
+        branch: scores[optionIndex].preferred,
+        optionIndex,
+        penalty: scoreRegret(best, scores[optionIndex])
+      });
+    }
+    alternatives.push({
+      chosen: best,
+      branch: best.alternate,
+      optionIndex: scores.length,
+      penalty: Math.abs(best.importance)
+    });
+    for (const alternative of alternatives.sort((a, b) => a.penalty - b.penalty || a.optionIndex - b.optionIndex)) {
+      queue.push({
+        ...applyBranch(snapshotNode(node), alternative.chosen, alternative.branch, true, scores),
+        penalty: node.penalty + alternative.penalty + alternative.optionIndex * 1e-9,
+        branchBacktracks: (node.branchBacktracks || 0) + 1,
+        label: `regret ${formatPenalty(node.penalty + alternative.penalty)}`
+      });
+      queued++;
+      pruneQueue();
+    }
+  }
+
+  function pruneQueue() {
+    if (queue.length + explored > branchLimit) {
+      queue.sort(compareBranches);
+      queue.splice(branchLimit - explored);
+    }
+  }
+
+  function compareBranches(a, b) {
+    return a.remaining - b.remaining || a.penalty - b.penalty;
+  }
+
+  function applyBranch(node, chosen, branch, isAlternate, scores) {
+    const spins = [...node.spins];
+    spins[chosen.originalSpin] = branch;
+    const fixed = fixSpin(node.model, chosen.localSpinIndex, branch);
+    const step = {
+      type: "taylor",
+      step: node.depth + 1,
+      spin: chosen.originalSpin + 1,
+      Lplus: chosen.Lplus,
+      Lminus: chosen.Lminus,
+      importance: chosen.importance,
+      chosen: branch,
+      preferred: chosen.preferred,
+      isAlternate,
+      candidateScores: scores,
+      backtracksSoFar: (node.branchBacktracks || 0) + (isAlternate ? 1 : 0),
+      fieldUpdates: fixed.fieldUpdates,
+      constantChange: fixed.constantChange
+    };
+    return { model: fixed.model, spins, depth: node.depth + 1, remaining: fixed.model.n, trace: [...node.trace, step], penalty: node.penalty || 0, branchBacktracks: node.branchBacktracks || 0, precheckSummary: node.precheckSummary };
+  }
+
+  function snapshotNode(node) {
+    return {
+      model: node.model,
+      spins: [...node.spins],
+      depth: node.depth,
+      remaining: node.model.n,
+      trace: [...node.trace],
+      penalty: node.penalty || 0,
+      branchBacktracks: node.branchBacktracks || 0,
+      precheckSummary: node.precheckSummary
+    };
+  }
+
+  function recordComplete(node) {
+    const energy = exactEnergy(originalModel, node.spins);
+    if (!firstComplete) firstComplete = { energy, spins: [...node.spins], trace: node.trace };
+    if (energy < bestEnergy - 1e-10) {
+      bestEnergy = energy;
+      bestSpins = [...node.spins];
+      bestPrecheckSummary = node.precheckSummary || {};
+      decisionLog.splice(0, decisionLog.length, ...node.trace);
+    }
+  }
+}
+
+function scoreRegret(best, candidate) {
+  return Math.max(0, Math.abs(best.importance) - Math.abs(candidate.importance));
+}
+
+function formatPenalty(value) {
+  if (!Number.isFinite(value)) return String(value);
+  if (Math.abs(value) < 1e-10) return "0";
+  return Number(value.toPrecision(8)).toString();
 }
 
 function mergeSummaries(a = {}, b = {}) {
@@ -739,25 +819,27 @@ function factorial(n) {
   return n <= 1 ? 1 : n * factorial(n - 1);
 }
 
-function buildSpinGlass50Text() {
+function buildSpinGlass100Text() {
   let seed = 501337;
   const rand = () => {
     seed = (1664525 * seed + 1013904223) >>> 0;
     return seed / 2 ** 32;
   };
-  const lines = ["N 50", "", "FIELDS"];
-  for (let i = 1; i <= 50; i++) lines.push(`${i} ${Math.round((rand() * 1.2 - 0.6) * 100) / 100}`);
+  const n = 100;
+  const targetEdges = 240;
+  const lines = [`N ${n}`, "", "FIELDS"];
+  for (let i = 1; i <= n; i++) lines.push(`${i} ${Math.round((rand() * 1.2 - 0.6) * 100) / 100}`);
   lines.push("", "COUPLINGS");
   const used = new Set();
-  for (let i = 1; i <= 49; i++) {
+  for (let i = 1; i < n; i++) {
     const j = i + 1;
     const J = Math.round((rand() * 2 - 1) * 100) / 100 || 0.25;
     used.add(`${i}:${j}`);
     lines.push(`${i} ${j} ${J}`);
   }
-  while (used.size < 120) {
-    const i = 1 + Math.floor(rand() * 50);
-    const j = 1 + Math.floor(rand() * 50);
+  while (used.size < targetEdges) {
+    const i = 1 + Math.floor(rand() * n);
+    const j = 1 + Math.floor(rand() * n);
     if (i === j) continue;
     const a = Math.min(i, j);
     const b = Math.max(i, j);
@@ -771,34 +853,21 @@ function buildSpinGlass50Text() {
 }
 
 const examples = {
-  spinGlass50: {
-    name: "50-node spin glass",
+  spinGlass100: {
+    name: "100-node spin glass",
     benchmark: "No built-in certificate; use for visual/search behavior.",
-    text: buildSpinGlass50Text()
-  },
-  ferroRing8: {
-    name: "8-spin ferromagnetic ring",
-    benchmark: "Known ground energy -8; all spins equal.",
-    text: "N 8\n\nFIELDS\n1 0\n2 0\n3 0\n4 0\n5 0\n6 0\n7 0\n8 0\n\nCOUPLINGS\n1 2 1\n2 3 1\n3 4 1\n4 5 1\n5 6 1\n6 7 1\n7 8 1\n8 1 1"
-  },
-  antiferroRing8: {
-    name: "8-spin antiferro ring",
-    benchmark: "Known ground energy -8; alternating spins.",
-    text: "N 8\n\nFIELDS\n1 0\n2 0\n3 0\n4 0\n5 0\n6 0\n7 0\n8 0\n\nCOUPLINGS\n1 2 -1\n2 3 -1\n3 4 -1\n4 5 -1\n5 6 -1\n6 7 -1\n7 8 -1\n8 1 -1"
+    text: buildSpinGlass100Text()
   },
   frustratedRing9: {
     name: "9-spin frustrated AF ring",
     benchmark: "Known ground energy -7; one unsatisfied bond is unavoidable.",
     text: "N 9\n\nFIELDS\n1 0\n2 0\n3 0\n4 0\n5 0\n6 0\n7 0\n8 0\n9 0\n\nCOUPLINGS\n1 2 -1\n2 3 -1\n3 4 -1\n4 5 -1\n5 6 -1\n6 7 -1\n7 8 -1\n8 9 -1\n9 1 -1"
-  },
-  plantedField12: {
-    name: "12-spin planted fields",
-    benchmark: "Known planted assignment: + + - + - - + - + + - -.",
-    text: "N 12\n\nFIELDS\n1 2.4\n2 2.1\n3 -2.6\n4 2.2\n5 -2.5\n6 -2.3\n7 2.7\n8 -2.4\n9 2.2\n10 2.5\n11 -2.1\n12 -2.8\n\nCOUPLINGS\n1 2 0.3\n2 3 -0.2\n3 4 0.25\n4 5 -0.3\n5 6 0.2\n6 7 -0.25\n7 8 0.35\n8 9 -0.2\n9 10 0.3\n10 11 -0.25\n11 12 0.2\n12 1 -0.3\n1 7 0.15\n3 9 -0.15\n5 11 0.1"
   }
 };
 
 const $ = (id) => document.getElementById(id);
+const VISUAL_SPIN_LIMIT = 100;
+let previewTimer = null;
 const visualState = {
   model: null,
   result: null,
@@ -809,17 +878,14 @@ const visualState = {
   importance: new Map(),
   selected: null,
   step: 0,
-  timer: null
+  sourceText: ""
 };
 
 function options() {
   return {
     beta: Number($("beta").value),
     order: 5,
-    mode: $("mode").value,
-    maxBacktracks: Number($("backtracks").value),
-    visualizationOn: $("visualizationOn").checked,
-    maxRenderedSpins: Number($("maxRenderedSpins").value)
+    maxBacktracks: Number($("backtracks").value)
   };
 }
 
@@ -846,7 +912,7 @@ function modelStats(model) {
 
 function runSolver() {
   try {
-    write("Running fifth-order Taylor/cumulant solver. For 50 nodes this can take a while in the browser.");
+    write("Running fifth-order Taylor/cumulant solver. For 100 nodes this can take a while in the browser.");
     setTimeout(() => {
       try {
         const model = currentModel();
@@ -854,7 +920,8 @@ function runSolver() {
         const cumulants = calculateCumulants(model, 5);
         const lnz = approximateLnZ(model, opts.beta, 5);
         const result = solveTaylor(model, opts);
-        if (opts.visualizationOn) prepareVisualization(model, result);
+        prepareVisualization(model, result);
+        showFinalAssignment();
         const stats = modelStats(model);
         setSummary([
           ["spins", model.n],
@@ -865,54 +932,31 @@ function runSolver() {
           ["runtime", `${formatNumber(result.runtimeMs)} ms`]
         ]);
         const lines = [
-          "Input summary",
+          "Answer",
+          `Final spins: ${formatSpins(result.spins)}`,
+          `Exact final energy: ${formatNumber(result.energy)}`,
+          "",
+          "Run summary",
           `N: ${model.n}`,
           `Couplings: ${stats.couplings}`,
           `Nonzero fields: ${stats.fields}`,
           `Beta: ${opts.beta}`,
           "Taylor order: 5",
-          "",
-          "Cumulants",
-          ...[1, 2, 3, 4, 5].map((r) => `kappa${r}: ${formatNumber(cumulants.kappa[r])}`),
-          `Cycles: triangles=${cumulants.counts.triangles}, C4=${cumulants.counts.cycles4}, C5=${cumulants.counts.cycles5}`,
-          `ln Z approximation: ${formatNumber(lnz.value)}`,
-          "",
-          "Search result",
-          `Final spins: ${formatSpins(result.spins)}`,
-          `Exact final energy: ${formatNumber(result.energy)}`,
-          `Best energy found: ${formatNumber(result.bestEnergy)}`,
           `Decisions: ${result.decisions}`,
-          `Backtracks: ${result.backtracks}`,
+          `Backtrack branches explored: ${result.backtracks}`,
+          `Total branches explored: ${result.branchesExplored || 1}`,
           `Runtime: ${formatNumber(result.runtimeMs)} ms`,
+          `ln Z approximation: ${formatNumber(lnz.value)}`,
+          `Cycles: triangles=${cumulants.counts.triangles}, C4=${cumulants.counts.cycles4}, C5=${cumulants.counts.cycles5}`,
           "",
           "Precheck summary",
-          ...formatPrecheckSummary(result.precheckSummary),
-          "",
-          "Decision trace",
-          ...formatDecisionLog(result.decisionLog)
+          ...formatPrecheckSummary(result.precheckSummary)
         ];
         write(lines.join("\n"));
       } catch (error) {
         write(`Error: ${error.message}`);
       }
     }, 20);
-  } catch (error) {
-    write(`Error: ${error.message}`);
-  }
-}
-
-function runBetaBenchmark() {
-  try {
-    const model = currentModel();
-    const opts = options();
-    const betas = $("betaList").value.split(/\s+/).map(Number).filter(Number.isFinite);
-    const rows = ["Beta | Energy found | Backtracks | Runtime ms", "---- | ------------ | ---------- | ----------"];
-    for (const beta of betas) {
-      const result = solveTaylor(model, { ...opts, beta });
-      rows.push(`${beta} | ${formatNumber(result.energy)} | ${result.backtracks} | ${formatNumber(result.runtimeMs)}`);
-    }
-    setSummary([["benchmark", "beta sweep"], ["order", 5], ["mode", opts.mode], ["cases", betas.length]]);
-    write(rows.join("\n"));
   } catch (error) {
     write(`Error: ${error.message}`);
   }
@@ -972,69 +1016,66 @@ function formatPrecheckSummary(summary = {}) {
 function prepareVisualization(model, result) {
   visualState.model = model;
   visualState.result = result;
+  visualState.sourceText = $("isingInput")?.value || "";
   visualState.assignments = new Map();
   visualState.reasons = new Map();
   visualState.importance = new Map();
   visualState.selected = null;
   visualState.step = 0;
-  const cap = Number($("maxRenderedSpins").value || 150);
-  const count = Math.min(model.n, cap);
-  const nodes = Array.from({ length: count }, (_, i) => {
-    const angle = (i / count) * Math.PI * 2;
-    const radius = 285 + 76 * Math.sin(i * 1.7);
-    return { index: i, x: 450 + Math.cos(angle) * radius, y: 380 + Math.sin(angle) * radius, vx: 0, vy: 0 };
-  });
+  if (model.n > VISUAL_SPIN_LIMIT) {
+    visualState.nodes = [];
+    visualState.edges = [];
+    drawVisualization();
+    return;
+  }
+  const nodes = layoutNodes(model.n, 450, 380, 325);
   const rendered = new Set(nodes.map((n) => n.index));
-  visualState.edges = [...model.couplings.entries()].map(([key, J]) => {
+  visualState.edges = (model.edges || [...model.couplings.entries()].map(([key, J]) => {
     const [a, b] = key.split(":").map(Number);
-    return { a, b, J };
-  }).filter((e) => rendered.has(e.a) && rendered.has(e.b));
+    return { i: a, j: b, J };
+  })).map((edge) => ({ a: edge.i, b: edge.j, J: edge.J }))
+    .filter((e) => rendered.has(e.a) && rendered.has(e.b));
   visualState.nodes = nodes;
-  settleLayout();
   drawVisualization();
 }
 
-function settleLayout() {
-  const nodes = visualState.nodes;
-  const edges = visualState.edges;
-  for (let tick = 0; tick < 140; tick++) {
-    for (const node of nodes) {
-      node.vx += (450 - node.x) * 0.0007;
-      node.vy += (380 - node.y) * 0.0007;
-    }
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i];
-        const b = nodes[j];
-        const dx = a.x - b.x;
-        const dy = a.y - b.y;
-        const force = 56 / Math.max(64, dx * dx + dy * dy);
-        a.vx += dx * force;
-        a.vy += dy * force;
-        b.vx -= dx * force;
-        b.vy -= dy * force;
-      }
-    }
-    for (const edge of edges) {
-      const a = nodes[edge.a];
-      const b = nodes[edge.b];
-      if (!a || !b) continue;
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const dist = Math.max(1, Math.hypot(dx, dy));
-      const force = (dist - 122) * 0.0028;
-      a.vx += dx / dist * force;
-      a.vy += dy / dist * force;
-      b.vx -= dx / dist * force;
-      b.vy -= dy / dist * force;
-    }
-    for (const node of nodes) {
-      node.vx *= 0.86;
-      node.vy *= 0.86;
-      node.x = Math.min(870, Math.max(30, node.x + node.vx));
-      node.y = Math.min(730, Math.max(30, node.y + node.vy));
+function previewCurrentGraph() {
+  try {
+    const text = $("isingInput").value;
+    if (text !== visualState.sourceText) prepareVisualization(parseIsingText(text), null);
+    else drawVisualization();
+  } catch (error) {
+    const box = $("visualInfo");
+    if (box) box.textContent = `Input error: ${error.message}`;
+  }
+}
+
+function scheduleGraphPreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(previewCurrentGraph, 180);
+}
+
+function layoutNodes(count, centerX, centerY, maxRadius) {
+  if (count <= 0) return [];
+  if (count === 1) return [{ index: 0, x: centerX, y: centerY }];
+  const rings = Math.max(1, Math.ceil(Math.sqrt(count / 8)));
+  const nodes = [];
+  let placed = 0;
+  for (let ring = 1; ring <= rings && placed < count; ring++) {
+    const remaining = count - placed;
+    const ringCapacity = ring === rings ? remaining : Math.max(6, Math.round((count * ring) / ((rings * (rings + 1)) / 2)));
+    const radius = Math.max(42, (maxRadius * ring) / rings);
+    const phase = (ring % 2) * Math.PI / Math.max(1, ringCapacity);
+    for (let k = 0; k < ringCapacity && placed < count; k++, placed++) {
+      const angle = phase + (k / ringCapacity) * Math.PI * 2;
+      nodes.push({
+        index: placed,
+        x: centerX + Math.cos(angle) * radius,
+        y: centerY + Math.sin(angle) * radius
+      });
     }
   }
+  return nodes;
 }
 
 function drawVisualization() {
@@ -1044,9 +1085,18 @@ function drawVisualization() {
   const rect = canvas.getBoundingClientRect();
   const scale = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = Math.max(640, Math.floor(rect.width * scale));
-  canvas.height = Math.max(520, Math.floor(760 * scale));
-  ctx.setTransform(canvas.width / 900, 0, 0, canvas.height / 760, 0, 0);
-  ctx.clearRect(0, 0, 900, 760);
+  const logicalHeight = 760;
+  canvas.height = Math.max(620, Math.floor(rect.height * scale));
+  ctx.setTransform(canvas.width / 900, 0, 0, canvas.height / logicalHeight, 0, 0);
+  ctx.clearRect(0, 0, 900, logicalHeight);
+  if (visualState.model.n > VISUAL_SPIN_LIMIT) {
+    ctx.fillStyle = "#edf6f5";
+    ctx.font = "18px system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("Visualization unavailable for more than 100 spins.", 450, 365);
+    updateVisualInfo();
+    return;
+  }
   const maxJ = Math.max(0.01, ...visualState.edges.map((e) => Math.abs(e.J)));
   for (const edge of visualState.edges) {
     const a = visualState.nodes[edge.a];
@@ -1108,36 +1158,8 @@ function nodeColor(value, reason) {
   return "#17212c";
 }
 
-function runVisualAnimation() {
-  if (!visualState.result) runSolver();
-  pauseVisualAnimation();
-  visualState.timer = setInterval(() => stepVisualization(1), 650);
-}
-
-function pauseVisualAnimation() {
-  if (visualState.timer) clearInterval(visualState.timer);
-  visualState.timer = null;
-}
-
 function resetVisualization() {
-  pauseVisualAnimation();
   prepareVisualization(currentModel(), visualState.result);
-}
-
-function stepVisualization(count) {
-  if (!visualState.result) return;
-  const log = visualState.result.decisionLog || [];
-  for (let c = 0; c < count && visualState.step < log.length; c++) {
-    const entry = log[visualState.step++];
-    const spin = entry.spin - 1;
-    if (spin >= visualState.nodes.length) continue;
-    visualState.selected = spin;
-    visualState.assignments.set(spin, entry.type === "precheck" ? entry.value : entry.chosen);
-    visualState.reasons.set(spin, entry.type === "precheck" ? entry.reason : (entry.isAlternate ? "BACKTRACKED" : "TAYLOR_DECISION"));
-    if (entry.importance !== undefined) visualState.importance.set(spin, entry.importance);
-  }
-  if (visualState.step >= log.length) pauseVisualAnimation();
-  drawVisualization();
 }
 
 function showFinalAssignment() {
@@ -1188,8 +1210,8 @@ function updateVisualInfo() {
   const model = visualState.model;
   const box = $("visualInfo");
   if (!model || !box) return;
-  if (model.n > visualState.nodes.length) {
-    box.textContent = `Model contains ${model.n} spins. Visualization capped at ${visualState.nodes.length} spins. Solver is still using the full model.`;
+  if (model.n > VISUAL_SPIN_LIMIT) {
+    box.textContent = `Visualization unavailable for ${model.n} spins. The solver can still run on the full input.`;
     return;
   }
   if (visualState.selected === null) {
@@ -1235,25 +1257,9 @@ function init() {
     });
     $("exampleButtons").append(button);
   }
-  $("isingInput").value = examples.spinGlass50.text;
-  document.querySelectorAll(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      document.querySelectorAll(".tab, .panel").forEach((node) => node.classList.remove("active"));
-      tab.classList.add("active");
-      $(tab.dataset.panel).classList.add("active");
-      if (tab.dataset.panel === "visualizer") drawVisualization();
-    });
-  });
-  $("previewGraph").addEventListener("click", () => {
-    prepareVisualization(currentModel(), null);
-    document.querySelectorAll(".tab, .panel").forEach((node) => node.classList.remove("active"));
-    document.querySelector('[data-panel="visualizer"]').classList.add("active");
-    $("visualizer").classList.add("active");
-    setSummary([["visual", "ready"], ["spins", currentModel().n]]);
-    write("Graph preview ready. This does not run the solver.");
-  });
+  $("isingInput").value = examples.spinGlass100.text;
+  $("isingInput").addEventListener("input", scheduleGraphPreview);
   $("runSolver").addEventListener("click", runSolver);
-  $("runBetaBenchmark").addEventListener("click", runBetaBenchmark);
   $("clearOutput").addEventListener("click", () => {
     setSummary([]);
     write("Ready.");
@@ -1265,16 +1271,11 @@ function init() {
       prepareVisualization(currentModel(), null);
     }
   });
-  $("visualRun").addEventListener("click", runVisualAnimation);
-  $("visualPause").addEventListener("click", pauseVisualAnimation);
-  $("visualNext").addEventListener("click", () => stepVisualization(1));
-  $("visualFinal").addEventListener("click", showFinalAssignment);
-  $("visualReset").addEventListener("click", resetVisualization);
   $("spinCanvas").addEventListener("click", selectCanvasSpin);
   window.addEventListener("resize", drawVisualization);
   prepareVisualization(currentModel(), null);
-  setSummary([["spins", 50], ["example", "50-node spin glass"], ["visual", "ready"]]);
-  write("Ready. Preview shows unresolved spins. Press Run Taylor solver to compute assignments, then use Next or Final in the Visualizer.");
+  setSummary([["spins", 100], ["example", "100-node spin glass"], ["visual", "ready"]]);
+  write("Ready. Preview shows unresolved spins. Press Run Taylor solver to compute assignments and draw the final Visualizer state.");
 }
 
 init();
